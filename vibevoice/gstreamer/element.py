@@ -12,6 +12,9 @@ import threading
 import queue
 import time
 
+from .audio_generator import AudioGenerator
+from .audio_pusher import AudioPusher
+
 
 class GstVibeVoice(Gst.Element):
     """
@@ -242,20 +245,60 @@ class GstVibeVoice(Gst.Element):
 
     def start_threads(self):
         """Start background threads"""
-        # For now, just set running flag
-        # Full threading will be implemented in Phase 2
         with self._lock:
             self.running = True
             self._eos_received = False
 
-        # Threads started (placeholder)
+            # Create and start AudioGenerator thread
+            if self.generator is None or not self.generator.is_alive():
+                self.generator = AudioGenerator(
+                    self.sentence_queue,
+                    self.audio_queue,
+                    self.model_manager,
+                    self.voice_manager,
+                    self,
+                    self.interrupt_flag
+                )
+                self.generator.start()
+
+            # Create and start AudioPusher thread
+            if self.pusher is None or not self.pusher.is_alive():
+                self.pusher = AudioPusher(
+                    self.audio_queue,
+                    self.srcpad,
+                    self,
+                    self.interrupt_flag
+                )
+                self.pusher.start()
+
+        # Threads started
 
     def stop_threads(self):
         """Stop background threads"""
         with self._lock:
             self.running = False
 
-        # Threads stopped (placeholder)
+        # Send sentinel to stop generator thread
+        try:
+            self.sentence_queue.put(None, timeout=1.0)
+        except queue.Full:
+            pass
+
+        # Wait for generator to finish (with timeout)
+        if self.generator and self.generator.is_alive():
+            self.generator.join(timeout=2.0)
+
+        # Send sentinel to stop pusher thread
+        try:
+            self.audio_queue.put(None, timeout=1.0)
+        except queue.Full:
+            pass
+
+        # Wait for pusher to finish (with timeout)
+        if self.pusher and self.pusher.is_alive():
+            self.pusher.join(timeout=2.0)
+
+        # Threads stopped
 
     def cleanup(self):
         """Cleanup resources"""
