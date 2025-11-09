@@ -162,6 +162,10 @@ Gst.Caps.from_string(
 {
   "command": "get_status"
 }
+
+{
+  "command": "interrupt"
+}
 ```
 
 **Response**: Element posts messages to bus
@@ -214,7 +218,7 @@ class GstVibeVoice(Gst.Element):
         self.speed = 1.0
 
         # Buffering
-        self.sentence_queue = queue.Queue(maxsize=10)
+        self.sentence_queue = queue.Queue(maxsize=100)  # Larger buffer for production
         self.audio_queue = queue.Queue(maxsize=50)
 
         # Threading
@@ -273,11 +277,12 @@ Main Thread                Generator Thread           Pusher Thread
 
 **Sentence Queue** (input buffering):
 ```python
-self.sentence_queue = queue.Queue(maxsize=10)
+self.sentence_queue = queue.Queue(maxsize=100)
 ```
-- Max 10 sentences queued
+- Max 100 sentences queued (configurable via property)
 - Blocks if full (backpressure)
 - FIFO order
+- Can be flushed via interrupt command
 
 **Audio Queue** (output buffering):
 ```python
@@ -289,8 +294,33 @@ self.audio_queue = queue.Queue(maxsize=50)
 
 **Watermark Management**:
 ```python
-LOW_WATERMARK = 5   # Start generating when queue < 5 chunks
+LOW_WATERMARK = 5    # Start generating when queue < 5 chunks
 HIGH_WATERMARK = 40  # Pause generating when queue > 40 chunks
+```
+
+**Interrupt Mechanism**:
+```python
+def interrupt_generation(self):
+    """Interrupt current generation and flush buffers"""
+    # Clear sentence queue
+    while not self.sentence_queue.empty():
+        try:
+            self.sentence_queue.get_nowait()
+        except queue.Empty:
+            break
+
+    # Clear audio queue
+    while not self.audio_queue.empty():
+        try:
+            self.audio_queue.get_nowait()
+        except queue.Empty:
+            break
+
+    # Signal threads to skip current generation
+    self.interrupt_flag.set()
+
+    # Emit interrupted signal
+    self.emit("interrupted")
 ```
 
 ---
@@ -437,6 +467,21 @@ class GstVibeVoice(Gst.Element):
         )
     )
 
+    # Signals (GObject signals for events)
+    __gsignals__ = {
+        "model-loading": (GObject.SignalFlags.RUN_FIRST, None, (str,)),
+        "model-loaded": (GObject.SignalFlags.RUN_FIRST, None, (str,)),
+        "model-unloaded": (GObject.SignalFlags.RUN_FIRST, None, ()),
+        "compilation-started": (GObject.SignalFlags.RUN_FIRST, None, ()),
+        "compilation-finished": (GObject.SignalFlags.RUN_FIRST, None, ()),
+        "ready": (GObject.SignalFlags.RUN_FIRST, None, (bool,)),
+        "interrupted": (GObject.SignalFlags.RUN_FIRST, None, ()),
+        "voice-loaded": (GObject.SignalFlags.RUN_FIRST, None, (str,)),
+        "voice-changed": (GObject.SignalFlags.RUN_FIRST, None, (str,)),
+        "queue-full": (GObject.SignalFlags.RUN_FIRST, None, ()),
+        "generation-error": (GObject.SignalFlags.RUN_FIRST, None, (str,)),
+    }
+
     # Properties (GObject properties for gst-inspect)
     __gproperties__ = {
         "model": (
@@ -474,11 +519,18 @@ class GstVibeVoice(Gst.Element):
             True,
             GObject.ParamFlags.READWRITE
         ),
-        "queue-size": (
+        "sentence-queue-size": (
             int,
             "Sentence queue size",
             "Maximum sentences to buffer",
-            1, 100, 10,
+            1, 1000, 100,
+            GObject.ParamFlags.READWRITE
+        ),
+        "audio-queue-size": (
+            int,
+            "Audio queue size",
+            "Maximum audio chunks to buffer",
+            10, 500, 50,
             GObject.ParamFlags.READWRITE
         )
     }
@@ -509,8 +561,11 @@ class GstVibeVoice(Gst.Element):
         self.control_handler = ControlHandler(self)
 
         # Queues
-        self.sentence_queue = queue.Queue(maxsize=10)
+        self.sentence_queue = queue.Queue(maxsize=100)
         self.audio_queue = queue.Queue(maxsize=50)
+
+        # Interrupt flag
+        self.interrupt_flag = threading.Event()
 
         # Threads
         self.generator = None
@@ -649,6 +704,31 @@ class GstVibeVoice(Gst.Element):
             except queue.Empty:
                 break
 
+    def interrupt_generation(self):
+        """Interrupt current generation and flush buffers"""
+        with self.lock:
+            # Clear sentence queue
+            while not self.sentence_queue.empty():
+                try:
+                    self.sentence_queue.get_nowait()
+                except queue.Empty:
+                    break
+
+            # Clear audio queue
+            while not self.audio_queue.empty():
+                try:
+                    self.audio_queue.get_nowait()
+                except queue.Empty:
+                    break
+
+            # Set interrupt flag (generator thread checks this)
+            self.interrupt_flag.set()
+
+            # Emit interrupted signal
+            self.emit("interrupted")
+
+            Gst.info("Generation interrupted, buffers flushed")
+
     def chain_text(self, pad, parent, buffer):
         """Handle incoming text buffer"""
         # Extract text
@@ -671,6 +751,7 @@ class GstVibeVoice(Gst.Element):
             Gst.debug(f"Queued text: {text[:50]}...")
         except queue.Full:
             Gst.warning("Sentence queue full, dropping buffer")
+            self.emit("queue-full")
             return Gst.FlowReturn.OK  # Or ERROR to signal backpressure
 
         return Gst.FlowReturn.OK
@@ -774,16 +855,18 @@ class ModelManager:
         self.compiled = False
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
 
-    def load_model(self, model_name: str, compile: bool = True, diffusion_steps: int = 10):
+    def load_model(self, model_name: str, compile: bool = True, diffusion_steps: int = 10, element=None):
         """Load VibeVoice model"""
         from vibevoice.modular.modeling_vibevoice_inference import VibeVoiceForConditionalGenerationInference
         from vibevoice.processor.vibevoice_processor import VibeVoiceProcessor
 
         # Unload existing model
         if self.model is not None:
-            self.unload_model()
+            self.unload_model(element=element)
 
         print(f"Loading model: {model_name}")
+        if element:
+            element.emit("model-loading", model_name)
 
         # Load processor
         self.processor = VibeVoiceProcessor.from_pretrained(model_name)
@@ -802,16 +885,21 @@ class ModelManager:
 
         # Compile if requested
         if compile and self.device == "cuda":
-            self.compile_model()
+            self.compile_model(element=element)
 
         print(f"Model loaded: {model_name}")
+        if element:
+            element.emit("model-loaded", model_name)
+            element.emit("ready", True)
 
-    def compile_model(self):
+    def compile_model(self, element=None):
         """Apply torch.compile optimization"""
         if self.compiled:
             return
 
         print("Compiling model with torch.compile...")
+        if element:
+            element.emit("compilation-started")
 
         # Compile key components
         self.model.model.acoustic_tokenizer.decoder = torch.compile(
@@ -852,13 +940,17 @@ class ModelManager:
 
         self.compiled = True
         print("Model compilation complete")
+        if element:
+            element.emit("compilation-finished")
 
-    def unload_model(self):
+    def unload_model(self, element=None):
         """Unload model and free VRAM"""
         if self.model is None:
             return
 
         print("Unloading model...")
+        if element:
+            element.emit("ready", False)
 
         # Move to CPU
         if self.device == "cuda":
@@ -879,6 +971,8 @@ class ModelManager:
             torch.cuda.synchronize()
 
         print("Model unloaded")
+        if element:
+            element.emit("model-unloaded")
 
     def is_loaded(self) -> bool:
         """Check if model is loaded"""
@@ -931,13 +1025,15 @@ class VoiceManager:
         self.voices: Dict[str, str] = {}  # name -> audio_path
         self.current_voice = None
 
-    def load_voice(self, name: str, audio_path: str):
+    def load_voice(self, name: str, audio_path: str, element=None):
         """Load a voice reference"""
         if not os.path.exists(audio_path):
             raise FileNotFoundError(f"Voice audio not found: {audio_path}")
 
         self.voices[name] = audio_path
         print(f"Voice '{name}' loaded from {audio_path}")
+        if element:
+            element.emit("voice-loaded", name)
 
     def unload_voice(self, name: str):
         """Unload a voice reference"""
@@ -948,13 +1044,15 @@ class VoiceManager:
             if self.current_voice == name:
                 self.current_voice = None
 
-    def set_current_voice(self, name: str):
+    def set_current_voice(self, name: str, element=None):
         """Set the active voice"""
         if name not in self.voices:
             raise ValueError(f"Voice '{name}' not loaded")
 
         self.current_voice = name
         print(f"Current voice set to '{name}'")
+        if element:
+            element.emit("voice-changed", name)
 
     def get_current_voice_path(self) -> Optional[str]:
         """Get the current voice audio path"""
@@ -1011,6 +1109,8 @@ class ControlHandler:
             self.handle_set_parameters(command)
         elif cmd_type == "get_status":
             self.handle_get_status()
+        elif cmd_type == "interrupt":
+            self.handle_interrupt()
         else:
             Gst.warning(f"Unknown command: {cmd_type}")
             self.send_error(f"Unknown command: {cmd_type}")
@@ -1025,21 +1125,24 @@ class ControlHandler:
             self.element.model_manager.load_model(
                 model_name,
                 compile=compile,
-                diffusion_steps=diffusion_steps
+                diffusion_steps=diffusion_steps,
+                element=self.element
             )
             self.send_status(f"Model loaded: {model_name}")
         except Exception as e:
             Gst.error(f"Failed to load model: {e}")
             self.send_error(f"Model load failed: {e}")
+            self.element.emit("generation-error", str(e))
 
     def handle_unload_model(self):
         """Unload model command"""
         try:
-            self.element.model_manager.unload_model()
+            self.element.model_manager.unload_model(element=self.element)
             self.send_status("Model unloaded")
         except Exception as e:
             Gst.error(f"Failed to unload model: {e}")
             self.send_error(f"Model unload failed: {e}")
+            self.element.emit("generation-error", str(e))
 
     def handle_load_voice(self, command):
         """Load voice command"""
@@ -1051,11 +1154,12 @@ class ControlHandler:
             return
 
         try:
-            self.element.voice_manager.load_voice(name, audio_path)
+            self.element.voice_manager.load_voice(name, audio_path, element=self.element)
             self.send_status(f"Voice loaded: {name}")
         except Exception as e:
             Gst.error(f"Failed to load voice: {e}")
             self.send_error(f"Voice load failed: {e}")
+            self.element.emit("generation-error", str(e))
 
     def handle_unload_voice(self, command):
         """Unload voice command"""
@@ -1081,11 +1185,12 @@ class ControlHandler:
             return
 
         try:
-            self.element.voice_manager.set_current_voice(name)
+            self.element.voice_manager.set_current_voice(name, element=self.element)
             self.send_status(f"Current voice set to: {name}")
         except Exception as e:
             Gst.error(f"Failed to set voice: {e}")
             self.send_error(f"Set voice failed: {e}")
+            self.element.emit("generation-error", str(e))
 
     def handle_set_parameters(self, command):
         """Set parameters command"""
@@ -1124,6 +1229,15 @@ class ControlHandler:
             status["vram_usage_gb"] = torch.cuda.memory_allocated() / 1e9
 
         self.send_status(json.dumps(status, indent=2))
+
+    def handle_interrupt(self):
+        """Interrupt command"""
+        try:
+            self.element.interrupt_generation()
+            self.send_status("Generation interrupted, buffers flushed")
+        except Exception as e:
+            Gst.error(f"Failed to interrupt: {e}")
+            self.send_error(f"Interrupt failed: {e}")
 
     def send_status(self, message: str):
         """Send status message to bus"""
@@ -1301,6 +1415,86 @@ def test_pipewire_pipeline():
 
 ## Usage Examples
 
+### Signal Handling Example
+
+```python
+import gi
+gi.require_version('Gst', '1.0')
+from gi.repository import Gst, GLib
+
+Gst.init(None)
+
+# Create pipeline
+pipeline = Gst.Pipeline()
+tts = Gst.ElementFactory.make("vibevoice", "tts")
+sink = Gst.ElementFactory.make("autoaudiosink", "sink")
+
+pipeline.add(tts, sink)
+tts.link(sink)
+
+# Connect to signals
+def on_model_loading(element, model_name):
+    print(f"🔄 Model loading: {model_name}")
+
+def on_model_loaded(element, model_name):
+    print(f"✅ Model loaded: {model_name}")
+
+def on_model_unloaded(element):
+    print(f"🗑️  Model unloaded")
+
+def on_compilation_started(element):
+    print(f"⚙️  Compilation started (this may take 30-60s)...")
+
+def on_compilation_finished(element):
+    print(f"✅ Compilation finished!")
+
+def on_ready(element, is_ready):
+    if is_ready:
+        print(f"🟢 Element ready for generation")
+    else:
+        print(f"🔴 Element not ready")
+
+def on_interrupted(element):
+    print(f"⚠️  Generation interrupted, buffers flushed")
+
+def on_voice_loaded(element, voice_name):
+    print(f"🎤 Voice loaded: {voice_name}")
+
+def on_voice_changed(element, voice_name):
+    print(f"🔊 Voice changed to: {voice_name}")
+
+def on_queue_full(element):
+    print(f"⚠️  Sentence queue full! (backpressure)")
+
+def on_generation_error(element, error_message):
+    print(f"❌ Generation error: {error_message}")
+
+# Connect signals
+tts.connect("model-loading", on_model_loading)
+tts.connect("model-loaded", on_model_loaded)
+tts.connect("model-unloaded", on_model_unloaded)
+tts.connect("compilation-started", on_compilation_started)
+tts.connect("compilation-finished", on_compilation_finished)
+tts.connect("ready", on_ready)
+tts.connect("interrupted", on_interrupted)
+tts.connect("voice-loaded", on_voice_loaded)
+tts.connect("voice-changed", on_voice_changed)
+tts.connect("queue-full", on_queue_full)
+tts.connect("generation-error", on_generation_error)
+
+# Start pipeline
+pipeline.set_state(Gst.State.PLAYING)
+
+# Example output:
+# 🔄 Model loading: vibevoice/VibeVoice-1.5B
+# ⚙️  Compilation started (this may take 30-60s)...
+# ✅ Compilation finished!
+# ✅ Model loaded: vibevoice/VibeVoice-1.5B
+# 🟢 Element ready for generation
+```
+
+---
+
 ### Basic Pipeline
 
 ```bash
@@ -1455,6 +1649,21 @@ text_pad.chain(text_buffer2)
 
 # Get status
 send_control({"command": "get_status"})
+
+# Send more text
+for i in range(20):
+    text_buffer = Gst.Buffer.new_wrapped(f"This is sentence number {i}.".encode('utf-8'))
+    text_pad.chain(text_buffer)
+
+# Interrupt generation (flush all queued sentences)
+import time
+time.sleep(2)  # Let some sentences queue up
+send_control({"command": "interrupt"})
+print("🛑 Interrupted! All queued sentences flushed.")
+
+# Continue with new text
+text_buffer = Gst.Buffer.new_wrapped(b"This sentence plays immediately after interrupt.")
+text_pad.chain(text_buffer)
 
 # Run main loop
 loop = GLib.MainLoop()
