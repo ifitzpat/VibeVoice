@@ -14,6 +14,7 @@ import time
 
 from .audio_generator import AudioGenerator
 from .audio_pusher import AudioPusher
+from .control_handler import ControlHandler
 
 
 class GstVibeVoice(Gst.Element):
@@ -162,6 +163,7 @@ class GstVibeVoice(Gst.Element):
         # Managers
         self.model_manager = ModelManager()
         self.voice_manager = VoiceManager()
+        self.control_handler = ControlHandler(self)
 
         # Queues
         self.sentence_queue = queue.Queue(maxsize=100)
@@ -382,8 +384,8 @@ class GstVibeVoice(Gst.Element):
         finally:
             buffer.unmap(map_info)
 
-        # Process command (will be implemented in Phase 3)
-        # Control command received
+        # Process command via control handler
+        self.control_handler.handle_command(command_json)
 
         return Gst.FlowReturn.OK
 
