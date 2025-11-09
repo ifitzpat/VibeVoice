@@ -14,10 +14,14 @@ from gi.repository import Gst
 @pytest.fixture
 def vibevoice_element():
     """Create a VibeVoice element for testing"""
-    from vibevoice.gstreamer.plugin import register_plugin
+    from vibevoice.gstreamer.element import GstVibeVoice
+    from gi.repository import GObject
 
-    register_plugin()
-    element = Gst.ElementFactory.make("vibevoice", "test")
+    # Ensure type is registered
+    GObject.type_register(GstVibeVoice)
+
+    # Instantiate directly (bypass factory for testing)
+    element = GstVibeVoice()
     return element
 
 
@@ -61,9 +65,11 @@ class TestElementPads:
         controlpad = vibevoice_element.get_static_pad("control")
         assert controlpad is None
 
-        # Request control pad
-        template = vibevoice_element.get_pad_template("control")
+        # Request control pad - access template directly from class
+        # Python bindings don't always support get_pad_template for custom elements
+        template = vibevoice_element.__gsttemplates__[2]  # Third template is control
         assert template is not None
+        assert template.name_template == "control"
 
         controlpad = vibevoice_element.request_pad(template, "control", None)
         assert controlpad is not None

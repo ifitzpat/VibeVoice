@@ -5,6 +5,16 @@ These tests verify model loading, unloading, compilation, and generation.
 """
 import pytest
 
+# Check if PyTorch is available
+try:
+    import torch
+    TORCH_AVAILABLE = True
+except ImportError:
+    TORCH_AVAILABLE = False
+
+# Mark for skipping tests that require PyTorch
+requires_torch = pytest.mark.skipif(not TORCH_AVAILABLE, reason="PyTorch not installed")
+
 
 @pytest.fixture
 def model_manager():
@@ -33,6 +43,7 @@ class TestModelManagerBasics:
 class TestModelLoading:
     """Test model loading functionality"""
 
+    @requires_torch
     def test_load_model_sets_model_name(self, model_manager, monkeypatch, mock_model, mock_processor):
         """Test that load_model sets the model name"""
         # Mock the imports
@@ -82,6 +93,7 @@ class TestModelLoading:
         assert model_manager.model_name == "test-model"
         assert model_manager.is_loaded() is True
 
+    @requires_torch
     def test_load_model_emits_signals(self, model_manager, monkeypatch, mock_model, mock_processor):
         """Test that load_model emits appropriate signals"""
         # Setup mocks
@@ -120,6 +132,7 @@ class TestModelLoading:
         assert "model-loaded" in signal_names
         assert "ready" in signal_names
 
+    @requires_torch
     def test_load_model_sets_diffusion_steps(self, model_manager, monkeypatch, mock_model, mock_processor):
         """Test that load_model sets diffusion steps on model"""
         # Setup mocks
@@ -150,6 +163,7 @@ class TestModelLoading:
 class TestModelUnloading:
     """Test model unloading functionality"""
 
+    @requires_torch
     def test_unload_model_clears_state(self, model_manager, monkeypatch, mock_model, mock_processor):
         """Test that unload_model clears all model state"""
         # Load a model first
@@ -183,6 +197,7 @@ class TestModelUnloading:
         assert model_manager.compiled is False
         assert model_manager.is_loaded() is False
 
+    @requires_torch
     def test_unload_model_emits_signals(self, model_manager, monkeypatch, mock_model, mock_processor):
         """Test that unload_model emits appropriate signals"""
         # Load a model first
@@ -240,6 +255,7 @@ class TestModelGeneration:
         with pytest.raises(RuntimeError, match="Model not loaded"):
             model_manager.generate("test text")
 
+    @requires_torch
     def test_generate_returns_audio(self, model_manager, monkeypatch, mock_model, mock_processor):
         """Test that generate returns audio data"""
         # Load model
@@ -269,6 +285,7 @@ class TestModelGeneration:
         assert audio is not None
         assert len(audio) > 0
 
+    @requires_torch
     def test_generate_uses_voice_sample(self, model_manager, monkeypatch, mock_model, mock_processor):
         """Test that generate can use voice samples"""
         # Load model

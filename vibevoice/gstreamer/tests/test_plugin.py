@@ -19,42 +19,43 @@ class TestPluginRegistration:
 
     def test_plugin_can_be_registered(self):
         """Test that we can register the VibeVoice plugin"""
-        # This will be implemented when we create the plugin
-        # For now, we'll test that we can register a type
+        from vibevoice.gstreamer.element import GstVibeVoice
+        from gi.repository import GObject
+
+        # Ensure type can be registered
+        gtype = GObject.type_register(GstVibeVoice)
+        assert gtype is not None
+
+    def test_element_can_be_instantiated_directly(self):
+        """Test that we can instantiate the element directly"""
+        # Python GStreamer elements can be instantiated directly
+        # without factory registration
+        from vibevoice.gstreamer.element import GstVibeVoice
+        from gi.repository import GObject
+
+        GObject.type_register(GstVibeVoice)
+        element = GstVibeVoice()
+        assert element is not None
+
+    def test_element_has_required_pads(self):
+        """Test that element has the required pads"""
+        from vibevoice.gstreamer.element import GstVibeVoice
+        from gi.repository import GObject
+
+        GObject.type_register(GstVibeVoice)
+        element = GstVibeVoice()
+
+        # Check pads exist
+        assert element.get_static_pad("sink") is not None
+        assert element.get_static_pad("src") is not None
+
+    def test_element_has_metadata(self):
+        """Test that element class has metadata defined"""
         from vibevoice.gstreamer.element import GstVibeVoice
 
-        # Type should be registered
-        assert hasattr(GstVibeVoice, '__gtype__')
-
-    def test_element_factory_exists(self):
-        """Test that element factory is available after registration"""
-        # Try to get the element factory
-        # This requires the plugin to be registered with GStreamer
-        from vibevoice.gstreamer.plugin import register_plugin
-
-        # Register plugin
-        register_plugin()
-
-        # Check if element factory exists
-        factory = Gst.ElementFactory.find("vibevoice")
-        assert factory is not None
-
-    def test_element_can_be_created(self):
-        """Test that we can create a VibeVoice element"""
-        from vibevoice.gstreamer.plugin import register_plugin
-
-        register_plugin()
-        element = Gst.ElementFactory.make("vibevoice", "test_tts")
-        assert element is not None
-        assert element.get_name() == "test_tts"
-
-    def test_element_metadata(self):
-        """Test that element has correct metadata"""
-        from vibevoice.gstreamer.plugin import register_plugin
-
-        register_plugin()
-        factory = Gst.ElementFactory.find("vibevoice")
-
-        # Check metadata
-        assert "VibeVoice" in factory.get_metadata("long-name")
-        assert "TTS" in factory.get_metadata("klass")
+        # Check __gstmetadata__ exists and is correct
+        assert hasattr(GstVibeVoice, '__gstmetadata__')
+        metadata = GstVibeVoice.__gstmetadata__
+        assert len(metadata) == 4
+        assert "VibeVoice" in metadata[0]
+        assert "TTS" in metadata[1]

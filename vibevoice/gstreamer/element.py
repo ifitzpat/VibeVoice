@@ -172,14 +172,14 @@ class GstVibeVoice(Gst.Element):
         self.pusher = None
         self.running = False
 
-        # State
-        self.lock = threading.Lock()
-        self.eos_received = False
+        # State (use _ prefix to avoid GObject field conflicts)
+        self._lock = threading.Lock()
+        self._eos_received = False
 
         # Timing
-        self.sample_rate = 24000
-        self.current_timestamp = 0
-        self.base_time = None
+        self._sample_rate = 24000
+        self._current_timestamp = 0
+        self._base_time = None
 
         # Properties
         self._model_name = "vibevoice/VibeVoice-1.5B"
@@ -190,20 +190,21 @@ class GstVibeVoice(Gst.Element):
         self._sentence_queue_size = 100
         self._audio_queue_size = 50
 
-        Gst.info(f"VibeVoice element created")
+        # Gst logging not available in Python bindings - use print for debugging if needed
+        # print("VibeVoice element created")
 
     def do_request_new_pad(self, template, name, caps):
         """Handle control pad creation"""
         if template.name_template == "control":
             if self.controlpad is not None:
-                Gst.warning("Control pad already exists")
+                # Control pad already exists
                 return None
 
             self.controlpad = Gst.Pad.new_from_template(template, "control")
             self.controlpad.set_chain_function_full(self.chain_control)
             self.add_pad(self.controlpad)
 
-            Gst.info("Control pad created")
+            # Control pad created
             return self.controlpad
 
         return None
@@ -243,18 +244,18 @@ class GstVibeVoice(Gst.Element):
         """Start background threads"""
         # For now, just set running flag
         # Full threading will be implemented in Phase 2
-        with self.lock:
+        with self._lock:
             self.running = True
-            self.eos_received = False
+            self._eos_received = False
 
-        Gst.info("Threads started (placeholder)")
+        # Threads started (placeholder)
 
     def stop_threads(self):
         """Stop background threads"""
-        with self.lock:
+        with self._lock:
             self.running = False
 
-        Gst.info("Threads stopped (placeholder)")
+        # Threads stopped (placeholder)
 
     def cleanup(self):
         """Cleanup resources"""
@@ -276,7 +277,7 @@ class GstVibeVoice(Gst.Element):
 
     def interrupt_generation(self):
         """Interrupt current generation and flush buffers"""
-        with self.lock:
+        with self._lock:
             # Clear sentence queue
             while not self.sentence_queue.empty():
                 try:
@@ -297,14 +298,14 @@ class GstVibeVoice(Gst.Element):
             # Emit interrupted signal
             self.emit("interrupted")
 
-        Gst.info("Generation interrupted, buffers flushed")
+        # Generation interrupted, buffers flushed
 
     def chain_text(self, pad, parent, buffer):
         """Handle incoming text buffer"""
         # Extract text
         success, map_info = buffer.map(Gst.MapFlags.READ)
         if not success:
-            Gst.error("Failed to map buffer")
+            # Failed to map buffer
             return Gst.FlowReturn.ERROR
 
         try:
@@ -318,9 +319,9 @@ class GstVibeVoice(Gst.Element):
         # Queue sentence for processing
         try:
             self.sentence_queue.put(text, block=True, timeout=1.0)
-            Gst.debug(f"Queued text: {text[:50]}...")
+            # Queued text successfully
         except queue.Full:
-            Gst.warning("Sentence queue full, dropping buffer")
+            # Sentence queue full, dropping buffer
             self.emit("queue-full")
             return Gst.FlowReturn.OK  # Or ERROR to signal backpressure
 
@@ -339,27 +340,27 @@ class GstVibeVoice(Gst.Element):
             buffer.unmap(map_info)
 
         # Process command (will be implemented in Phase 3)
-        Gst.info(f"Control command received: {command_json}")
+        # Control command received
 
         return Gst.FlowReturn.OK
 
     def sink_event(self, pad, parent, event):
         """Handle sink pad events"""
         if event.type == Gst.EventType.EOS:
-            Gst.info("EOS received on sink pad")
-            self.eos_received = True
+            # EOS received on sink pad
+            self._eos_received = True
             # Signal generator thread
             self.sentence_queue.put(None)
             return True
 
         elif event.type == Gst.EventType.CAPS:
             caps = event.parse_caps()
-            Gst.info(f"Caps event: {caps.to_string()}")
+            # Caps event received
             return True
 
         elif event.type == Gst.EventType.SEGMENT:
             segment = event.parse_segment()
-            self.base_time = segment.time
+            self._base_time = segment.time
             return True
 
         # Forward other events
